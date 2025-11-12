@@ -6,6 +6,10 @@
 
 ### Video explicativo: https://youtu.be/JTWK2fzk9UI
 
+#### Usuario con el que funcionó:
+User: jmmunozg1@eafit.edu.co
+pass: Mandr@kem012.
+
 # Proyecto 2
 
 ### 1. breve descripción de la actividad
@@ -213,47 +217,140 @@ requests==2.31.0
 
 #### Cómo se compila y ejecuta la aplicación
 
-1. Clonar el repositorio:
+1. Clonación y ejecución:
 
 ```
-git clone https://github.com/JuanDZM2105/Telematica-Kubernetes.git
-cd bookstore
-```
+# Clonar
+git clone https://github.com/jmmunozg1/Bookstore.git
+cd Bookstore
 
-2. Construir y ejecutar los contenedores:
-```
-docker-compose up --build
-```
-4. Acceder a la aplicación:
-```
-http://localhost:5000
-```
-#### Ejecución en AWS EKS
-1. Compilar imagen y subir a Amazon ECR:
-```   
-docker build -t bookstore:v1 .
-docker tag bookstore:v1 090583770987.dkr.ecr.us-east-1.amazonaws.com/bookstore:v1
-docker push 090583770987.dkr.ecr.us-east-1.amazonaws.com/bookstore:v1
-```
-2. 
-```
-eksctl create cluster -f cluster-app.yaml
-eksctl create cluster -f cluster-app.yaml
-```
+# Crear venv + deps
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
 
-3. Aplicar los manifiestos de Kubernetes:
-```
-kubectl apply -f namespace.yaml
-kubectl apply -f secrets.yaml
-kubectl apply -f efs-pv.yaml
-kubectl apply -f deployment.yaml
-kubectl apply -f service.yaml
-```
+# Variables de entorno (ajusta credenciales)
+export FLASK_ENV=development
+export DB_HOST=127.0.0.1
+export DB_NAME=bookstore
+export DB_USER=appuser
+export DB_PASSWORD=APP_STRONG_PASS!
 
-4. Verificar despliegue:
+# Correr (Flask dev) o Gunicorn (prod)
+flask run --host=0.0.0.0 --port=5000
+# ó
+gunicorn -b 0.0.0.0:5000 app:app
 ```
-kubectl get pods -n bookstore
-kubectl get svc -n bookstore
+App: http://127.0.0.1:5000
+
+2. Ejecución con docker/Compose:
+```
+# Crear .env (ejemplo)
+cat > .env <<'ENV'
+DB_HOST=10.0.10.221
+DB_NAME=bookstore
+DB_USER=appuser
+DB_PASSWORD=APP_STRONG_PASS!
+FLASK_ENV=production
+PORT=5000
+UPLOADS_DIR=/app/uploads
+BACKUPS_DIR=/app/backups
+ENV
+
+# Build & run
+docker compose build --no-cache
+docker compose up -d
+docker compose ps
+curl -I http://127.0.0.1:5000
+```
+Ejecución en AWS:
+
+1. Preparar instancia APP (cada EC2)
+```
+sudo apt-get update -y
+sudo apt-get install -y docker.io docker-compose-plugin git nfs-common
+sudo systemctl enable --now docker
+
+# Código
+sudo mkdir -p /opt && sudo chown $USER:$USER /opt
+git clone https://github.com/USUARIO/Bookstore.git /opt/bookstore
+cd /opt/bookstore
+
+# Variables (ajusta DB_HOST a tu MySQL-A y EFS ya montado en /mnt/efs)
+cat > .env <<'ENV'
+DB_HOST=10.0.10.221
+DB_NAME=bookstore
+DB_USER=appuser
+DB_PASSWORD=APP_STRONG_PASS!
+FLASK_ENV=production
+PORT=5000
+UPLOADS_DIR=/app/uploads
+BACKUPS_DIR=/app/backups
+ENV
+
+# Override: usa MySQL externo y EFS
+cat > docker-compose.override.yml <<'YAML'
+services:
+  db:
+    deploy: { replicas: 0 }
+    restart: "no"
+  flaskapp:
+    depends_on: []
+    environment:
+      - FLASK_APP=app.py
+      - FLASK_ENV=production
+      - PORT=5000
+      - DB_HOST=${DB_HOST}
+      - DB_NAME=${DB_NAME}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - UPLOADS_DIR=${UPLOADS_DIR}
+      - BACKUPS_DIR=${BACKUPS_DIR}
+      - SQLALCHEMY_DATABASE_URI=mysql+pymysql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}/${DB_NAME}
+    command: flask run --host=0.0.0.0 --port=5000
+    volumes:
+      - /mnt/efs/bookstore/uploads:/app/uploads
+      - /mnt/efs/bookstore/backups:/app/backups
+YAML
+
+# Levantar app
+docker compose pull || true
+docker compose up -d --remove-orphans
+curl -I http://127.0.0.1:5000
+```
+2) EFS (en cada instancia)
+
+```
+# Reemplaza por tu DNS o IP del mount target de EFS
+sudo mkdir -p /mnt/efs
+sudo mount -t nfs4 -o nfsvers=4.1 <EFS-MOUNT-TARGET>:/ /mnt/efs
+# Persistente:
+echo "<EFS-MOUNT-TARGET>:/ /mnt/efs nfs4 nfsvers=4.1,_netdev 0 0" | sudo tee -a /etc/fstab
+```
+3) MySQL en EC2
+   - mysql-a: base bookstore, usuario appuser/APP_STRONG_PASS!
+   - Seguridad: abrir 3306 solo desde el SG de la App (SG-APP-ASG)
+
+ 4) ALB + Target Group + ASG
+    - Target Group: tipo Instances, HTTP:5000, health check Path=/ (200–399)
+    - ALB (internet-facing): listener :80 → Forward → TG
+    - ASG: Launch Template de la App, 2 subnets privadas (2 AZ), Desired=2. Adjunta el TG
+    - Security Groups:
+        SG-ALB: Inbound 80 desde 0.0.0.0/0.
+        SG-APP-ASG: Inbound 5000 desde SG-ALB.
+        SG-EFS: Inbound 2049 desde SG-APP-ASG.
+        SG-MySQL: Inbound 3306 desde SG-APP-ASG
+
+ 5) Validación
+```
+ALB="alb-bookstore-XXXX.us-east-1.elb.amazonaws.com"
+curl -I http://$ALB              # 200 OK
+for i in {1..4}; do curl -s http://$ALB/ | head -n1; done
+
+# En cada APP (sustituye IPs privadas)
+ssh ubuntu@10.0.10.151 "mount | grep /mnt/efs; nc -zv 10.0.10.221 3306; curl -I http://127.0.0.1:5000 | head -n1"
+ssh ubuntu@10.0.11.105 "mount | grep /mnt/efs; nc -zv 10.0.10.221 3306; curl -I http://127.0.0.1:5000 | head -n1"
 ```
 
 5. Acceder a la URL pública del LoadBalancer.
