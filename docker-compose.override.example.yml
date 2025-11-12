@@ -1,0 +1,23 @@
+services:
+  db:
+    deploy: { replicas: 0 }
+    restart: "no"
+
+  flaskapp:
+    depends_on: []
+    environment:
+      - FLASK_APP=app.py
+      - FLASK_ENV=production
+      - PORT=5000
+      - DB_HOST=${DB_HOST}
+      - DB_NAME=${DB_NAME}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - UPLOADS_DIR=${UPLOADS_DIR}
+      - BACKUPS_DIR=${BACKUPS_DIR}
+      # >>> CLAVE: URL completa para SQLAlchemy (usa PyMySQL)
+      - SQLALCHEMY_DATABASE_URI=mysql+pymysql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}/${DB_NAME}
+    command: flask run --host=0.0.0.0 --port=5000
+    volumes:
+      - /mnt/efs/bookstore/uploads:/app/uploads
+      - /mnt/efs/bookstore/backups:/app/backups
